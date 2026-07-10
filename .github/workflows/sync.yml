@@ -1,0 +1,38 @@
+name: Sync auction history
+
+on:
+  schedule:
+    # Daily at 04:17 UTC — after Radar's board has settled for the day. The run
+    # is a single idempotent upsert: it downloads Radar's snapshot and merges it
+    # into the month-partitioned shards, touching only shards that changed.
+    - cron: "17 4 * * *"
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "pyproject.toml"
+      - ".github/workflows/sync.yml"
+
+# Only the HF push needs credentials; the repo itself is read-only here.
+permissions:
+  contents: read
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      HF_REPO_ID: ${{ vars.HF_REPO_ID }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync
+      - name: Upsert today's board into the HF dataset (+ regenerate the card)
+        run: uv run hetzner-auction-history sync

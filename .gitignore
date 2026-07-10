@@ -1,0 +1,20 @@
+# project output
+_local/
+data/
+.work/
+*.duckdb
+
+# python / uv
+.venv/
+__pycache__/
+*.pyc
+
+# tool caches
+.pytest_cache/
+.ruff_cache/
+.basedpyright/
+.hypothesis/
+.coverage
+htmlcov/
+dist/
+build/
