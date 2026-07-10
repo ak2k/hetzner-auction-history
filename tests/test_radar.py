@@ -27,32 +27,15 @@ def test_make_client_sets_browser_user_agent():
     client.close()
 
 
-def test_download_snapshot_writes_file_and_returns_etag(tmp_path: Path):
+def test_download_snapshot_writes_file_and_returns_dest(tmp_path: Path):
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"DUCKDB-BYTES", headers={"ETag": '"abc"'})
+        return httpx.Response(200, content=b"DUCKDB-BYTES")
 
     dest = tmp_path / "sb.duckdb"
     with _client(handler) as client:
         result = radar.download_snapshot(client, dest)
+    assert result == dest
     assert dest.read_bytes() == b"DUCKDB-BYTES"
-    assert result.not_modified is False
-    assert result.etag == '"abc"'
-
-
-def test_download_snapshot_conditional_304_short_circuits(tmp_path: Path):
-    seen: dict[str, str | None] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["inm"] = request.headers.get("If-None-Match")
-        return httpx.Response(304)
-
-    dest = tmp_path / "sb.duckdb"
-    with _client(handler) as client:
-        result = radar.download_snapshot(client, dest, prev_etag='"abc"')
-    assert seen["inm"] == '"abc"'  # conditional header sent
-    assert result.not_modified is True
-    assert result.etag == '"abc"'
-    assert not dest.exists()  # nothing written on 304
 
 
 def test_download_retries_on_503_then_succeeds(tmp_path: Path):
@@ -69,6 +52,20 @@ def test_download_retries_on_503_then_succeeds(tmp_path: Path):
         _ = radar.download_snapshot(client, dest)
     assert attempts["n"] == 2
     assert dest.read_bytes() == b"OK"
+
+
+def test_download_retries_exhausted_raises(tmp_path: Path):
+    attempts = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        return httpx.Response(503)  # always down
+
+    dest = tmp_path / "sb.duckdb"
+    with _client(handler) as client, pytest.raises(ExternalServiceError):
+        _ = radar.download_snapshot(client, dest)
+    assert attempts["n"] > 1  # retried before giving up
+    assert not dest.exists()
 
 
 def test_download_wraps_error_and_cleans_temp(tmp_path: Path):

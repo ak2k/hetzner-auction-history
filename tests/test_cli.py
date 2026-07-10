@@ -1,16 +1,20 @@
-"""Tests for the sync CLI orchestration — network + HF seams stubbed."""
+"""Tests for the sync CLI orchestration.
+
+The Radar download is stubbed to hand back a small real DuckDB snapshot, so the
+whole DuckDB read -> merge -> write path runs for real; only the network (radar
+client) and HuggingFace seams are replaced.
+"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import duckdb
 import httpx
-import pandas as pd
 
-from hetzner_auction_history import cli, convert, hf, radar
+from hetzner_auction_history import cli, hf, radar
 from hetzner_auction_history.cli import sync
 from hetzner_auction_history.config import Settings
-from hetzner_auction_history.radar import SnapshotResult
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -18,17 +22,20 @@ if TYPE_CHECKING:
     import pytest
 
 
-def _snapshot_frame() -> pd.DataFrame:
-    """A two-month snapshot, one row per (id, day), as read_auction_frame returns."""
-    return pd.DataFrame(
-        {
-            "id": [1, 2],
-            "day": ["2026-06-01", "2026-07-15"],
-            "seen": pd.to_datetime(["2026-06-01 20:00", "2026-07-15 12:00"]),
-            "price": [90.0, 50.0],
-            "month": ["2026-06", "2026-07"],
-        }
+def _make_radar_db(path: Path) -> None:
+    con = duckdb.connect(str(path))
+    con.execute(
+        "CREATE TABLE server (id BIGINT, seen TIMESTAMP, price INTEGER, "
+        "server_type VARCHAR, cpu VARCHAR)"
     )
+    con.execute(
+        """
+        INSERT INTO server VALUES
+          (1, TIMESTAMP '2026-06-01 20:00:00', 90, 'auction', 'Xeon'),
+          (2, TIMESTAMP '2026-07-15 12:00:00', 50, 'auction', 'Ryzen')
+        """
+    )
+    con.close()
 
 
 def _settings(tmp_path: Path, *, token: str | None) -> Settings:
@@ -40,26 +47,23 @@ def _settings(tmp_path: Path, *, token: str | None) -> Settings:
     )
 
 
-def _patch_source(monkeypatch: pytest.MonkeyPatch, settings: Settings, frame: pd.DataFrame) -> None:
-    def fake_download(
-        _client: httpx.Client, _dest: Path, *, prev_etag: str | None = None
-    ) -> SnapshotResult:
-        return SnapshotResult(not_modified=False, etag='"new"')
-
-    def fake_read(_db: Path) -> pd.DataFrame:
-        return frame
+def _patch_source(monkeypatch: pytest.MonkeyPatch, settings: Settings, radar_db: Path) -> None:
+    def fake_download(_client: httpx.Client, dest: Path) -> Path:
+        _ = dest.write_bytes(radar_db.read_bytes())  # hand back the real snapshot
+        return dest
 
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
     monkeypatch.setattr(radar, "make_client", httpx.Client)
     monkeypatch.setattr(radar, "download_snapshot", fake_download)
-    monkeypatch.setattr(convert, "read_auction_frame", fake_read)
 
 
-def test_sync_dry_run_writes_local_shards_and_skips_hf(
+def test_sync_dry_run_writes_hive_shards_and_skips_hf(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    radar_db = tmp_path / "radar.duckdb"
+    _make_radar_db(radar_db)
     settings = _settings(tmp_path, token=None)
-    _patch_source(monkeypatch, settings, _snapshot_frame())
+    _patch_source(monkeypatch, settings, radar_db)
 
     def _boom(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("HF must not be touched in dry-run")
@@ -71,20 +75,22 @@ def test_sync_dry_run_writes_local_shards_and_skips_hf(
     sync(repo=None, no_upload=True)
 
     data = settings.data_dir / "data"
-    assert (data / "2026-06.parquet").exists()
-    assert (data / "2026-07.parquet").exists()
-    assert (settings.data_dir / "README.md").exists()  # card written locally too
+    assert (data / "month=2026-06" / "data.parquet").exists()
+    assert (data / "month=2026-07" / "data.parquet").exists()
+    assert (settings.data_dir / "README.md").exists()
 
 
 def test_sync_upload_merges_and_uploads_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    radar_db = tmp_path / "radar.duckdb"
+    _make_radar_db(radar_db)
     settings = _settings(tmp_path, token="tok")
-    _patch_source(monkeypatch, settings, _snapshot_frame())
+    _patch_source(monkeypatch, settings, radar_db)
 
     downloaded: list[str] = []
     ensured: list[str] = []
     uploaded: list[str] = []
 
-    def fake_download_shard(_repo: str, month: str, _tok: str | None = None) -> pd.DataFrame | None:
+    def fake_download_shard(_repo: str, month: str, _tok: str | None = None) -> Path | None:
         downloaded.append(month)
         return None  # nothing published yet
 
@@ -103,26 +109,5 @@ def test_sync_upload_merges_and_uploads_folder(tmp_path: Path, monkeypatch: pyte
     assert sorted(downloaded) == ["2026-06", "2026-07"]  # merged against existing (absent) shards
     assert ensured == ["me/ds"]
     assert uploaded == [f"me/ds:{settings.data_dir}"]  # content-addressed, whole folder
-    assert (settings.data_dir / "data" / "2026-06.parquet").exists()
+    assert (settings.data_dir / "data" / "month=2026-06" / "data.parquet").exists()
     assert (settings.data_dir / "README.md").exists()
-
-
-def test_sync_short_circuits_on_not_modified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    settings = _settings(tmp_path, token="tok")
-
-    def fake_download(
-        _client: httpx.Client, _dest: Path, *, prev_etag: str | None = None
-    ) -> SnapshotResult:
-        return SnapshotResult(not_modified=True, etag='"same"')
-
-    def _boom_read(_db: Path) -> pd.DataFrame:
-        raise AssertionError("must not read the snapshot when 304")
-
-    monkeypatch.setattr(cli, "get_settings", lambda: settings)
-    monkeypatch.setattr(radar, "make_client", httpx.Client)
-    monkeypatch.setattr(radar, "download_snapshot", fake_download)
-    monkeypatch.setattr(convert, "read_auction_frame", _boom_read)
-
-    sync(repo=None, no_upload=False)
-
-    assert not (settings.data_dir / "data").exists()  # nothing written

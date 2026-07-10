@@ -25,6 +25,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       HF_REPO_ID: ${{ vars.HF_REPO_ID }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}

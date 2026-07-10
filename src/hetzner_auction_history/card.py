@@ -36,7 +36,7 @@ configs:
 - config_name: default
   data_files:
   - split: train
-    path: data/*.parquet
+    path: data/**/*.parquet
 ---
 """
 
@@ -71,11 +71,12 @@ trademark of its owner. Data provided as-is, with no correctness guarantee.
 ## Structure
 
 ```
-data/YYYY-MM.parquet     # one shard per calendar month
+data/month=YYYY-MM/data.parquet   # one Hive-partitioned shard per calendar month
 ```
 
-Each row is one listing observed on one day. Columns follow Radar's `server`
-schema (~39 columns), including:
+`month` is a Hive partition column (also stored in the file). Each row is one
+listing observed on one day. Columns follow Radar's `server` schema (~39
+columns), including:
 
 - **identity / time**: `id`, `seen` (observation timestamp), `day` (`YYYY-MM-DD`,
   the per-day key), `month` (`YYYY-MM`, the shard partition)
@@ -97,18 +98,19 @@ from datasets import load_dataset
 ds = load_dataset("{repo_id}", split="train")
 ```
 
-Or query the shards in place with DuckDB — no download, partition pruning by
-month over the whole history:
+Or query the shards in place with DuckDB — no download, `hive_partitioning=true`
+exposes `month` as a column and prunes by it over the whole history:
 
 ```sql
 -- cheapest listing seen each day in a given month
 SELECT day, min(price / 1.19) AS min_net_eur
-FROM 'hf://datasets/{repo_id}/data/2026-*.parquet'
+FROM read_parquet('hf://datasets/{repo_id}/data/**/*.parquet', hive_partitioning=true)
+WHERE month = '2026-06'
 GROUP BY day ORDER BY day;
 
 -- price trajectory of one auction id across its life
 SELECT day, price, price / 1.19 AS net_eur
-FROM 'hf://datasets/{repo_id}/data/*.parquet'
+FROM read_parquet('hf://datasets/{repo_id}/data/**/*.parquet', hive_partitioning=true)
 WHERE id = 1234567 ORDER BY day;
 ```
 

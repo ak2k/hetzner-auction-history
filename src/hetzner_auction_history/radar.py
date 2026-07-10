@@ -8,7 +8,7 @@ to callers.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 import httpx
 import stamina
@@ -34,25 +34,11 @@ _BROWSER_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 _TIMEOUT = httpx.Timeout(60.0, read=600.0)
-_NOT_MODIFIED = 304
 _FORBIDDEN = 403
 
 # Cloudflare / the origin can serve transient 5xx or rate-limit bursts; back off
 # and retry those (but not 403/404 — a UA or path fix, not a wait).
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
-
-
-class SnapshotResult(NamedTuple):
-    """Outcome of a snapshot download.
-
-    ``not_modified`` is True when a conditional GET matched the previous ETag
-    (HTTP 304): the file on disk is untouched and the caller can short-circuit.
-    ``etag`` is the current snapshot's ETag (for the next conditional GET), or
-    ``None`` if the server sent none.
-    """
-
-    not_modified: bool
-    etag: str | None
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -62,18 +48,12 @@ def _is_retryable(exc: Exception) -> bool:
 
 
 @stamina.retry(on=_is_retryable, attempts=6, wait_initial=2.0, wait_max=120.0)
-def _stream_to_file(
-    client: httpx.Client, url: str, dest: Path, prev_etag: str | None
-) -> SnapshotResult:
-    headers = {"If-None-Match": prev_etag} if prev_etag else {}
-    with client.stream("GET", url, headers=headers) as response:
-        if response.status_code == _NOT_MODIFIED:
-            return SnapshotResult(not_modified=True, etag=prev_etag)
+def _stream_to_file(client: httpx.Client, url: str, dest: Path) -> None:
+    with client.stream("GET", url) as response:
         _ = response.raise_for_status()
         with dest.open("wb") as fh:  # truncates on each (re)try — clean restart
             for chunk in response.iter_bytes(1 << 20):
                 _ = fh.write(chunk)
-        return SnapshotResult(not_modified=False, etag=response.headers.get("etag"))
 
 
 def make_client() -> httpx.Client:
@@ -83,35 +63,23 @@ def make_client() -> httpx.Client:
     )
 
 
-def download_snapshot(
-    client: httpx.Client, dest: Path, *, prev_etag: str | None = None
-) -> SnapshotResult:
+def download_snapshot(client: httpx.Client, dest: Path) -> Path:
     """Download the Radar snapshot to ``dest`` (atomic via a temp file).
 
-    When ``prev_etag`` is supplied, sends a conditional GET (``If-None-Match``);
-    an HTTP 304 short-circuits with ``not_modified=True`` and leaves ``dest``
-    untouched. At daily cadence this rarely triggers — Radar rewrites the file
-    every ~5 minutes so the ETag almost always differs — so it is cheap
-    insurance, not a load-bearing optimization.
-
     Raises:
-        ExternalServiceError: on transport or HTTP failure.
+        ExternalServiceError: on transport or HTTP failure (retries exhausted).
 
     """
     tmp = dest.with_suffix(dest.suffix + ".tmp")
-    log.info("radar.download.start", url=SNAPSHOT_URL, conditional=prev_etag is not None)
+    log.info("radar.download.start", url=SNAPSHOT_URL)
     try:
-        result = _stream_to_file(client, SNAPSHOT_URL, tmp, prev_etag)
+        _stream_to_file(client, SNAPSHOT_URL, tmp)
     except httpx.HTTPError as exc:
         tmp.unlink(missing_ok=True)
         hint = ""
         if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == _FORBIDDEN:
             hint = " (403 — Cloudflare rejects a non-browser User-Agent)"
         raise ExternalServiceError(f"failed to download Radar snapshot: {exc}{hint}") from exc
-    if result.not_modified:
-        tmp.unlink(missing_ok=True)
-        log.info("radar.download.not_modified")
-        return result
     _ = tmp.replace(dest)
     log.info("radar.download.done", mb=round(dest.stat().st_size / 1e6))
-    return result
+    return dest

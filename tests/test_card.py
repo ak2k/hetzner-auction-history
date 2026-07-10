@@ -29,7 +29,7 @@ def test_frontmatter_is_valid_yaml_with_expected_keys():
     configs = fm["configs"]
     assert len(configs) == 1
     assert configs[0]["config_name"] == "default"
-    assert configs[0]["data_files"][0]["path"] == "data/*.parquet"
+    assert configs[0]["data_files"][0]["path"] == "data/**/*.parquet"
     assert configs[0]["data_files"][0]["split"] == "train"
 
 

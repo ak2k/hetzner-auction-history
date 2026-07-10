@@ -18,8 +18,6 @@ from hetzner_auction_history.config import get_settings
 from hetzner_auction_history.log import configure
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from structlog.stdlib import BoundLogger
 
 log: BoundLogger = structlog.get_logger("hetzner_auction_history")  # pyright: ignore[reportAny]
@@ -30,16 +28,11 @@ app = typer.Typer(
 )
 
 _SNAPSHOT_FILE = "sb.duckdb"
-_ETAG_FILE = "sb.etag"
 
 
 @app.callback()
 def _root() -> None:  # pyright: ignore[reportUnusedFunction]  # registered via decorator, not called directly
     """Group callback — keeps ``sync`` a named subcommand (not the bare root)."""
-
-
-def _read_prev_etag(path: Path) -> str | None:
-    return path.read_text(encoding="utf-8").strip() or None if path.exists() else None
 
 
 @app.command()
@@ -69,44 +62,39 @@ def sync(
 
     settings.work_dir.mkdir(parents=True, exist_ok=True)
     db_path = settings.work_dir / _SNAPSHOT_FILE
-    etag_path = settings.work_dir / _ETAG_FILE
     with radar.make_client() as client:
-        result = radar.download_snapshot(client, db_path, prev_etag=_read_prev_etag(etag_path))
-    if result.not_modified:
-        log.info("sync.snapshot_unchanged")
-        return
-    if result.etag:
-        _ = etag_path.write_text(result.etag + "\n", encoding="utf-8")
+        _ = radar.download_snapshot(client, db_path)
 
-    frame = convert.read_auction_frame(db_path)
+    con = convert.attach_snapshot(db_path)
+    try:
+        month_list = convert.months(con)
+        log.info(
+            "sync.snapshot",
+            rows=convert.total_rows(con),
+            months=len(month_list),
+            span=[month_list[0], month_list[-1]] if month_list else [],
+        )
+        if not month_list:
+            log.warning("sync.empty_snapshot")
+            return
+
+        for month in month_list:
+            existing = None if no_upload else hf.download_shard(repo_id, month, token)
+            # Local tree mirrors the repo layout (data/month=YYYY-MM/data.parquet)
+            # so upload_folder + the card config resolve without remapping.
+            out_path = settings.data_dir / hf.shard_path(month)
+            stats = convert.merge_month(con, month, existing, out_path)
+            log.info("sync.shard", month=month, rows=stats.rows)
+    finally:
+        con.close()
     db_path.unlink(missing_ok=True)
-
-    shards = convert.partition_by_month(frame)
-    log.info(
-        "sync.snapshot",
-        rows=len(frame),
-        months=len(shards),
-        span=[shards[0][0], shards[-1][0]] if shards else [],
-    )
-    if not shards:
-        log.warning("sync.empty_snapshot")
-        return
-
-    # Shards live under <data_dir>/data/ so the local tree mirrors the repo
-    # layout (data/YYYY-MM.parquet) that upload_folder + the card config expect.
-    shard_dir = settings.data_dir / "data"
-    for month, new in shards:
-        existing = None if no_upload else hf.download_shard(repo_id, month, token)
-        merged = convert.merge_shard(existing, new)
-        _ = convert.write_shard(merged, shard_dir / f"{month}.parquet")
-        log.info("sync.shard", month=month, rows=len(merged))
 
     _ = card.write_card(repo_id, settings.data_dir)
 
     if not no_upload:
         hf.ensure_repo(repo_id, token)
         hf.upload_folder(repo_id, settings.data_dir, token)
-    log.info("sync.done", months=len(shards), uploaded=not no_upload)
+    log.info("sync.done", months=len(month_list), uploaded=not no_upload)
 
 
 def main() -> None:
