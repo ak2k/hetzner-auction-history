@@ -45,8 +45,6 @@ the full contract.
 ## Usage
 
 ```bash
-uv sync
-
 # Write the merged month shards to ./_local and skip HuggingFace entirely:
 uv run hetzner-auction-history sync --dry-run     # (alias: --no-upload)
 

@@ -1,10 +1,7 @@
-.PHONY: help install check lint format typecheck test fix clean
+.PHONY: help check lint format typecheck test fix clean
 
 help: ## show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-12s\033[0m %s\n", $$1, $$2}'
-
-install: ## uv sync (install all deps including dev)
-	uv sync
 
 check: lint typecheck test ## full inner loop (CI runs this)
 

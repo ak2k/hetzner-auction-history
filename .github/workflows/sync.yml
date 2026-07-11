@@ -34,6 +34,6 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
-      - run: uv sync
+      # `uv run` syncs the locked env itself — no separate `uv sync` step.
       - name: Upsert today's board into the HF dataset (+ regenerate the card)
         run: uv run hetzner-auction-history sync
