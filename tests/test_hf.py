@@ -14,11 +14,13 @@ import pytest
 from huggingface_hub.errors import (
     EntryNotFoundError,
     HfHubHTTPError,
+    LocalEntryNotFoundError,
     RepositoryNotFoundError,
 )
 
 from hetzner_auction_history import hf
 from hetzner_auction_history.errors import ExternalServiceError
+from hetzner_auction_history.hf import _list_files  # pyright: ignore[reportPrivateUsage]
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -120,6 +122,40 @@ def test_download_shard_wraps_raw_transport_error(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(hf, "hf_hub_download", fake_download)
     with pytest.raises(ExternalServiceError, match="failed to download"):
         _ = hf.download_shard("me/ds", "2026-07")
+
+
+def _raise_http() -> list[str]:
+    raise HfHubHTTPError("503 listing down", response=_RESP)
+
+
+def test_download_shard_ambiguous_listing_raises(monkeypatch: pytest.MonkeyPatch):
+    # The closed hole: a real connection-failure 404 (LocalEntryNotFoundError) where
+    # the file list ALSO can't be obtained -> absence is unproven -> must RAISE, not
+    # return None (which would truncate history).
+    def fake_download(
+        repo_id: str, filename: str, repo_type: str | None = None, token: str | None = None
+    ) -> str:
+        raise LocalEntryNotFoundError("connection failed while fetching")
+
+    monkeypatch.setattr(hf, "hf_hub_download", fake_download)
+    monkeypatch.setattr(hf, "HfApi", _fake_api(_raise_http))  # listing also fails
+    with pytest.raises(ExternalServiceError, match="failed to list files"):
+        _ = hf.download_shard("me/ds", "2026-07")
+
+
+def test_list_files_wraps_http_error(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(hf, "HfApi", _fake_api(_raise_http))
+    with pytest.raises(ExternalServiceError, match="failed to list files"):
+        _ = _list_files("me/ds", None)
+
+
+def test_list_files_propagates_repo_not_found(monkeypatch: pytest.MonkeyPatch):
+    def _raise_repo() -> list[str]:
+        raise RepositoryNotFoundError("no repo", response=_RESP)
+
+    monkeypatch.setattr(hf, "HfApi", _fake_api(_raise_repo))
+    with pytest.raises(RepositoryNotFoundError):  # NOT wrapped — caller distinguishes it
+        _ = _list_files("me/ds", None)
 
 
 def test_ensure_repo_wraps_http_error(monkeypatch: pytest.MonkeyPatch):

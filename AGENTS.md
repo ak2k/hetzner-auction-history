@@ -56,7 +56,7 @@ failures, not noise. Nix users: `nix develop` first; everything else is identica
 3. **Copy the canonical example.** Inventing a new shape for any of these
    is a deliberate choice. The defaults are:
    - HTTP service:  `src/hetzner_auction_history/radar.py` (httpx + stamina, error-wrapped)
-   - data pipeline: `src/hetzner_auction_history/convert.py` (DuckDB + pandas, isolated)
+   - data pipeline: `src/hetzner_auction_history/convert.py` (pure DuckDB, no pandas)
    - config:        `src/hetzner_auction_history/config.py`
    - logging:       `src/hetzner_auction_history/log.py`
    - test:          `tests/test_convert.py`

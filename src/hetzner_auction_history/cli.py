@@ -84,7 +84,7 @@ def sync(
             # so upload_folder + the card config resolve without remapping.
             out_path = settings.data_dir / hf.shard_path(month)
             stats = convert.merge_month(con, month, existing, out_path)
-            log.info("sync.shard", month=month, rows=stats.rows)
+            log.info("sync.shard", month=month, rows=stats.keys)
     finally:
         con.close()
     db_path.unlink(missing_ok=True)

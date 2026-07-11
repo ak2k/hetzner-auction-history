@@ -25,7 +25,8 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Above radar.py's worst-case retry budget (~9 min); keep the two in sync.
+    timeout-minutes: 15
     env:
       HF_REPO_ID: ${{ vars.HF_REPO_ID }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}

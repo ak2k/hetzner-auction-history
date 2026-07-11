@@ -1,7 +1,7 @@
 """Generate the HuggingFace dataset card (README.md).
 
 The YAML frontmatter declares a single ``default`` config globbing the
-month-partitioned shards (``data/*.parquet``) so the dataset viewer and
+Hive-partitioned shards (``data/**/*.parquet``) so the dataset viewer and
 ``datasets.load_dataset`` see one train split spanning all months. The body
 carries the schema summary, usage, the VAT note, and — prominently — Server
 Radar attribution.

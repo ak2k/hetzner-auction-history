@@ -33,8 +33,13 @@ _BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
-_TIMEOUT = httpx.Timeout(60.0, read=600.0)
+# The snapshot is only ~2-4 MB, so timeouts are tight. The whole retry budget is
+# bounded to stay well under the CI job's ceiling: at most 4 attempts x 120s read
+# + exponential backoff (2+4+8 ~ 14s) ~ 9 min worst case. Keep this in sync with
+# .github/workflows/sync.yml `timeout-minutes: 15`.
+_TIMEOUT = httpx.Timeout(30.0, read=120.0)
 _FORBIDDEN = 403
+_MAX_ATTEMPTS = 4
 
 # Cloudflare / the origin can serve transient 5xx or rate-limit bursts; back off
 # and retry those (but not 403/404 — a UA or path fix, not a wait).
@@ -47,7 +52,7 @@ def _is_retryable(exc: Exception) -> bool:
     return isinstance(exc, httpx.TransportError)
 
 
-@stamina.retry(on=_is_retryable, attempts=6, wait_initial=2.0, wait_max=120.0)
+@stamina.retry(on=_is_retryable, attempts=_MAX_ATTEMPTS, wait_initial=2.0, wait_max=30.0)
 def _stream_to_file(client: httpx.Client, url: str, dest: Path) -> None:
     with client.stream("GET", url) as response:
         _ = response.raise_for_status()

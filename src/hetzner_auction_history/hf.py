@@ -12,8 +12,11 @@ diffing here.
 
 A spurious HTTP 404 on an *existing* shard must never be mistaken for "this month
 is new": that would collapse the merge to trailing rows only and truncate aged-out
-history. So :func:`download_shard` confirms a not-found against the repo file list
-before treating a shard as absent.
+history. So :func:`download_shard` returns ``None`` (absent) **only** when it has
+positively proven absence — either the repo genuinely does not exist (a true first
+run) or the repo file list was obtained and does not contain the shard. Any
+ambiguity (a shard 404 contradicted by the listing, or a listing that could not be
+obtained) raises instead of being treated as absent.
 
 ``huggingface_hub`` and raw ``httpx`` errors are wrapped as domain errors here.
 """
@@ -46,13 +49,46 @@ def shard_path(month: str) -> str:
 
 
 def _list_files(repo_id: str, token: str | None) -> set[str]:
-    """Repo file list, or empty set when the repo does not exist yet."""
+    """Positively obtain the repo file list.
+
+    Lets ``RepositoryNotFoundError`` propagate (so the caller can treat a
+    genuinely-absent repo as a first run) and wraps any other failure as
+    ``ExternalServiceError`` — an ambiguous listing is never silently treated as
+    an empty set.
+
+    Raises:
+        RepositoryNotFoundError: if the repo does not exist.
+        ExternalServiceError: on any other transport/HTTP failure.
+
+    """
     try:
         return set(HfApi(token=token).list_repo_files(repo_id, repo_type="dataset"))
-    except RepositoryNotFoundError:
-        return set()
     except (HfHubHTTPError, httpx.HTTPError) as exc:
+        if isinstance(exc, RepositoryNotFoundError):
+            raise
         raise ExternalServiceError(f"failed to list files of {repo_id}: {exc}") from exc
+
+
+def _prove_absent_or_raise(
+    repo_id: str, path_in_repo: str, token: str | None, not_found: Exception
+) -> None:
+    """Confirm a downloaded shard is genuinely absent, or raise on any ambiguity.
+
+    Returns (None) only when absence is proven: the repo does not exist, or the
+    file list was obtained and lacks the shard. A shard the listing *does* contain
+    (a spurious 404), or a listing that could not be obtained, raises — so a
+    transient 404 is never mistaken for "absent" (which would truncate history).
+    """
+    try:
+        files = _list_files(repo_id, token)
+    except RepositoryNotFoundError:
+        return  # repo does not exist at all -> genuine first run
+    if path_in_repo in files:
+        raise ExternalServiceError(
+            f"{path_in_repo} is listed on {repo_id} but 404'd on download; refusing to "
+            f"treat it as absent (a merge would truncate aged-out history)"
+        ) from not_found
+    # repo exists and the shard is not listed -> positively proven absent
 
 
 def ensure_repo(repo_id: str, token: str | None = None) -> None:
@@ -71,24 +107,20 @@ def ensure_repo(repo_id: str, token: str | None = None) -> None:
 def download_shard(repo_id: str, month: str, token: str | None = None) -> Path | None:
     """Download the existing shard for ``month`` and return its local path.
 
-    Returns ``None`` only when the shard is genuinely absent (first run for the
-    month, or the repo does not exist yet). A not-found that *contradicts* the
-    repo file list — a spurious 404 on a shard that is listed — is raised, not
-    swallowed: treating it as absent would truncate published history.
+    Returns ``None`` only when absence is *positively proven* (see
+    :func:`_prove_absent_or_raise`); any ambiguity raises rather than risk a
+    truncating overwrite.
 
     Raises:
-        ExternalServiceError: on a contradictory 404, or transport/HTTP failure.
+        ExternalServiceError: on a contradictory/ambiguous 404, or transport/HTTP
+            failure.
 
     """
     path_in_repo = shard_path(month)
     try:
         local = hf_hub_download(repo_id, path_in_repo, repo_type="dataset", token=token)
     except (EntryNotFoundError, RepositoryNotFoundError) as nf:
-        if path_in_repo in _list_files(repo_id, token):
-            raise ExternalServiceError(
-                f"{path_in_repo} is listed on {repo_id} but 404'd on download; refusing "
-                f"to treat it as absent (a merge would truncate aged-out history)"
-            ) from nf
+        _prove_absent_or_raise(repo_id, path_in_repo, token, nf)
         return None
     except (HfHubHTTPError, httpx.HTTPError) as exc:
         raise ExternalServiceError(

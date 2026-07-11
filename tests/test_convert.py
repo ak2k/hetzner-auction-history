@@ -107,7 +107,7 @@ def test_merge_first_run_dedups_new(tmp_path: Path):
     out = tmp_path / "data.parquet"
     stats = convert.merge_month(con, "2026-06", None, out)
     con.close()
-    assert stats.rows == 1
+    assert stats.keys == 1
     assert _read(out) == [(1, "2026-06-01", 90)]
 
 
@@ -120,7 +120,7 @@ def test_merge_price_change_same_day_keeps_latest(tmp_path: Path):
     stats = convert.merge_month(con, "2026-06", existing, out)
     con.close()
 
-    assert stats.rows == 1
+    assert stats.keys == 1
     assert _read(out) == [(1, "2026-06-01", 90)]  # latest observation wins
 
 
@@ -201,15 +201,15 @@ def test_merge_keeps_latest_across_repeated_same_day_observations(
     out = tmp_path_factory.mktemp("shard") / "data.parquet"
     stats = convert.merge_month(con, "2026-06", None, out)
     con.close()
-    assert stats.rows == 1
+    assert stats.keys == 1
     assert _read(out) == [(1, "2026-06-01", prices[-1])]  # latest seen wins
 
 
 def test_check_monotonic_allows_growth():
-    _check_monotonic(  # no raise: more rows, same tail
+    _check_monotonic(  # no raise: more distinct keys, same tail
         "2026-04",
-        merged=ShardStats(rows=10, min_day="2026-04-01"),
-        prev=ShardStats(rows=8, min_day="2026-04-01"),
+        merged=ShardStats(keys=10, min_day="2026-04-01"),
+        prev=ShardStats(keys=8, min_day="2026-04-01"),
     )
 
 
@@ -217,16 +217,113 @@ def test_check_monotonic_blocks_row_shrink():
     with pytest.raises(ExternalServiceError, match="truncate aged-out history"):
         _check_monotonic(
             "2026-04",
-            merged=ShardStats(rows=3, min_day="2026-04-01"),
-            prev=ShardStats(rows=8, min_day="2026-04-01"),
+            merged=ShardStats(keys=3, min_day="2026-04-01"),
+            prev=ShardStats(keys=8, min_day="2026-04-01"),
         )
 
 
 def test_check_monotonic_blocks_tail_moving_forward():
-    # Same row count but the earliest day advanced — early history was dropped.
+    # Same key count but the earliest day advanced — early history was dropped.
     with pytest.raises(ExternalServiceError, match="truncate aged-out history"):
         _check_monotonic(
             "2026-04",
-            merged=ShardStats(rows=8, min_day="2026-04-15"),
-            prev=ShardStats(rows=8, min_day="2026-04-01"),
+            merged=ShardStats(keys=8, min_day="2026-04-15"),
+            prev=ShardStats(keys=8, min_day="2026-04-01"),
         )
+
+
+def test_merge_month_guard_raises_and_cleans_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # The guard can't fire on honest input (the merge is always a superset), so we
+    # drive it via the real merge_month entry point by making the existing shard's
+    # stats look larger than the merged output — simulating a merge-logic regression.
+    existing = tmp_path / "existing.parquet"
+    _write_shard(existing, [(1, "2026-04-02 10:00:00", 90)])
+    con = _con_with_auction([(1, "2026-04-02 20:00:00", 88)])
+    out = tmp_path / "data.parquet"
+
+    real_stats = convert.shard_stats
+
+    def fake_stats(c: DuckDBPyConnection, path: Path) -> ShardStats:
+        if path == existing:  # pretend the published shard had far more history
+            return ShardStats(keys=99, min_day="2026-01-01")
+        return real_stats(c, path)
+
+    monkeypatch.setattr(convert, "shard_stats", fake_stats)
+
+    with pytest.raises(ExternalServiceError, match="truncate aged-out history"):
+        _ = convert.merge_month(con, "2026-04", existing, out)
+    con.close()
+    assert not out.exists()  # never committed
+    assert not out.with_name(out.name + ".tmp").exists()  # scratch cleaned up
+
+
+def test_merge_tolerates_schema_drift(tmp_path: Path):
+    # An existing shard carrying a column the new snapshot lacks must merge (the
+    # extra column NULL-fills), not raise a raw DuckDB binder error.
+    existing = tmp_path / "existing.parquet"
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE t ({_SCHEMA}, extra VARCHAR)")
+    con.executemany(
+        "INSERT INTO t VALUES (?, ?, ?, ?, ?, ?)",
+        [(*r, "legacy") for r in _rows([(1, "2026-06-01 10:00:00", 100)])],
+    )
+    con.execute(f"COPY (SELECT * FROM t) TO '{existing}' (FORMAT PARQUET)")
+    con.close()
+
+    aucon = _con_with_auction([(1, "2026-06-02 10:00:00", 85)])  # no `extra` column
+    out = tmp_path / "data.parquet"
+    stats = convert.merge_month(aucon, "2026-06", existing, out)
+    verify = duckdb.connect()
+    cols = {
+        n for n, *_ in verify.execute(f"DESCRIBE SELECT * FROM read_parquet('{out}')").fetchall()
+    }
+    verify.close()
+    aucon.close()
+
+    assert stats.keys == 2  # both days retained
+    assert "extra" in cols  # drifted column preserved, NULL-filled for the new row
+
+
+def test_seen_tie_broken_deterministically_and_byte_identical(tmp_path: Path):
+    # Two rows with the SAME (id, day, seen) but different price: the dedup tie is
+    # broken by price DESC, and repeated merges are byte-identical (no churn).
+    con = _con_with_auction(
+        [
+            (1, "2026-06-01 12:00:00", 90),
+            (1, "2026-06-01 12:00:00", 100),  # identical seen, higher price
+        ]
+    )
+    a = tmp_path / "a.parquet"
+    b = tmp_path / "b.parquet"
+    convert.merge_month(con, "2026-06", None, a)
+    convert.merge_month(con, "2026-06", None, b)
+    con.close()
+    assert _read(a) == [(1, "2026-06-01", 100)]  # price DESC wins the tie
+    assert a.read_bytes() == b.read_bytes()
+
+
+class _CapLog:
+    """Minimal capturing logger; sidesteps structlog's first-use logger cache."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object]]] = []
+
+    def info(self, event: str, **kw: object) -> None:
+        self.events.append((event, kw))
+
+    def warning(self, event: str, **kw: object) -> None:
+        self.events.append((event, kw))
+
+
+def test_attach_snapshot_logs_dropped_null_seen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    db = tmp_path / "sb.duckdb"
+    _make_radar_db(db)  # contains exactly one auction row with NULL seen
+    cap = _CapLog()
+    monkeypatch.setattr(convert, "log", cap)
+
+    con = convert.attach_snapshot(db)
+    con.close()
+
+    auction = [kw for event, kw in cap.events if event == "convert.auction"]
+    assert auction and auction[0]["dropped_null_seen"] == 1
+    assert auction[0]["kept"] == 3

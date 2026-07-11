@@ -111,3 +111,53 @@ def test_sync_upload_merges_and_uploads_folder(tmp_path: Path, monkeypatch: pyte
     assert uploaded == [f"me/ds:{settings.data_dir}"]  # content-addressed, whole folder
     assert (settings.data_dir / "data" / "month=2026-06" / "data.parquet").exists()
     assert (settings.data_dir / "README.md").exists()
+
+
+def _make_empty_radar_db(path: Path) -> None:
+    """A snapshot whose rows are all filtered out -> zero auction rows."""
+    con = duckdb.connect(str(path))
+    con.execute(
+        "CREATE TABLE server (id BIGINT, seen TIMESTAMP, price INTEGER, "
+        "server_type VARCHAR, cpu VARCHAR)"
+    )
+    con.execute(
+        """
+        INSERT INTO server VALUES
+          (1, TIMESTAMP '2026-06-01 20:00:00',  0, 'auction', 'Xeon'),   -- price 0: filtered
+          (2, TIMESTAMP '2026-07-15 12:00:00', 50, 'ram',     'Ryzen')   -- non-auction: filtered
+        """
+    )
+    con.close()
+
+
+def test_sync_empty_snapshot_logs_and_skips_everything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    radar_db = tmp_path / "radar.duckdb"
+    _make_empty_radar_db(radar_db)
+    settings = _settings(tmp_path, token="tok")
+    _patch_source(monkeypatch, settings, radar_db)
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("no HF work on an empty snapshot")
+
+    monkeypatch.setattr(hf, "download_shard", _boom)
+    monkeypatch.setattr(hf, "ensure_repo", _boom)
+    monkeypatch.setattr(hf, "upload_folder", _boom)
+
+    events: list[str] = []
+
+    class _CapLog:
+        def info(self, event: str, **_kw: object) -> None:
+            events.append(event)
+
+        def warning(self, event: str, **_kw: object) -> None:
+            events.append(event)
+
+    monkeypatch.setattr(cli, "log", _CapLog())
+
+    sync(repo=None, no_upload=False)
+
+    assert "sync.empty_snapshot" in events
+    assert not (settings.data_dir / "data").exists()  # no shards
+    assert not (settings.data_dir / "README.md").exists()  # no card written
