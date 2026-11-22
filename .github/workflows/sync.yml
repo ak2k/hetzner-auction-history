@@ -38,3 +38,17 @@ jobs:
       # `uv run` syncs the locked env itself — no separate `uv sync` step.
       - name: Upsert today's board into the HF dataset (+ regenerate the card)
         run: uv run hetzner-auction-history sync
+
+  # GitHub disables a public repo's scheduled workflows after 60 days with no
+  # repository activity (it did here around 2026-09-09: the sync writes only to
+  # HF, never a commit). Re-enabling the workflow from its own daily run resets
+  # that clock without commits.
+  keepalive:
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/sync.yml/enable"
+        env:
+          GH_TOKEN: ${{ github.token }}
