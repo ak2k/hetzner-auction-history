@@ -36,8 +36,8 @@ Radar DuckDB snapshot  ->  DuckDB: dedup (id,day), merge existing partition  -> 
   shrink or advance the start of a published partition (so a transient upstream
   404 can't truncate history).
 
-> **Prices are gross** (incl. 19% German VAT), matching Radar. Divide by `1.19`
-> for the net price a non-EU buyer pays.
+> **Prices are net** (VAT-exclusive), as Hetzner's auction feed and Robot API
+> quote them. A buyer charged VAT adds it on top (19% in Germany).
 
 ## Usage
 

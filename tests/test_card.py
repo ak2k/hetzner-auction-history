@@ -35,8 +35,11 @@ def test_frontmatter_is_valid_yaml_with_expected_keys():
 
 def test_body_has_vat_note_and_radar_attribution():
     text = card.render_card("me/ds")
-    assert "1.19" in text  # VAT divisor
-    assert "19% German VAT" in text
+    # The feed and Robot API quote VAT-exclusive prices, stored verbatim.
+    assert "Prices are net" in text
+    assert "VAT-exclusive" in text
+    assert "gross" not in text
+    assert "1.19" not in text
     # Prominent Server Radar attribution + links.
     assert "Server Radar" in text
     assert "https://radar.iodev.org/" in text

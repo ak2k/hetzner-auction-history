@@ -87,8 +87,8 @@ columns), including:
 - **misc / auction**: `datacenter`, `is_highio`, `with_gpu`, `price`,
   `setup_price`
 
-> **Prices are gross** (include 19% German VAT), matching Radar. Divide `price`
-> by `1.19` for the net price a non-EU buyer pays.
+> **Prices are net** (VAT-exclusive), as Hetzner's auction feed and Robot API
+> quote them. A buyer charged VAT adds it on top (19% in Germany).
 
 ## Usage
 
@@ -103,13 +103,13 @@ exposes `month` as a column and prunes by it over the whole history:
 
 ```sql
 -- cheapest listing seen each day in a given month
-SELECT day, min(price / 1.19) AS min_net_eur
+SELECT day, min(price) AS min_eur
 FROM read_parquet('hf://datasets/{repo_id}/data/**/*.parquet', hive_partitioning=true)
 WHERE month = '2026-06'
 GROUP BY day ORDER BY day;
 
 -- price trajectory of one auction id across its life
-SELECT day, price, price / 1.19 AS net_eur
+SELECT day, price
 FROM read_parquet('hf://datasets/{repo_id}/data/**/*.parquet', hive_partitioning=true)
 WHERE id = 1234567 ORDER BY day;
 ```
